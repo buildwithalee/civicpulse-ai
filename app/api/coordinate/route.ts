@@ -1,25 +1,281 @@
 import { NextResponse } from "next/server";
 import { GoogleGenAI } from "@google/genai";
 
+type ActionStep = {
+  step: number;
+  department: string;
+  action: string;
+  depends_on: number | null;
+  status: "Pending";
+};
+
+type CoordinationResult = {
+  requires_coordination: boolean;
+  primary_department: string;
+  involved_departments: string[];
+  coordination_reason: string;
+  action_plan: ActionStep[];
+  coordination_source: "deterministic" | "gemini" | "fallback";
+};
+
 const wait = (ms: number) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+  new Promise((resolve) =>
+    setTimeout(resolve, ms)
+  );
 
-export async function POST(request: Request) {
+// =====================================
+// ELECTRICAL + TRAFFIC FAIL-SAFE
+// =====================================
+
+function detectDeterministicCoordination(
+  description: string,
+  category: string,
+  department: string
+): CoordinationResult | null {
+  const text =
+    `${description} ${category}`.toLowerCase();
+
+  const electricalWords = [
+    "electric",
+    "electrical",
+    "wire",
+    "cable",
+    "live wire",
+    "power line",
+    "shock",
+    "pole",
+    "transformer",
+  ];
+
+  const roadTrafficWords = [
+    "road",
+    "street",
+    "traffic",
+    "vehicle",
+    "vehicles",
+    "motorcycle",
+    "motorcyclist",
+    "blocking",
+    "blocked",
+    "obstruction",
+    "pedestrian",
+    "pedestrians",
+  ];
+
+  const hasElectrical =
+    electricalWords.some((word) =>
+      text.includes(word)
+    );
+
+  const hasRoadTraffic =
+    roadTrafficWords.some((word) =>
+      text.includes(word)
+    );
+
+  // =====================================
+  // CRITICAL DEMO CASE:
+  // Live wire + road/traffic
+  // =====================================
+
+  if (
+    hasElectrical &&
+    hasRoadTraffic
+  ) {
+    return {
+      requires_coordination: true,
+
+      primary_department:
+        department ||
+        "Electricity Department",
+
+      involved_departments: [
+        "Electricity Department",
+        "Traffic Management Department",
+        "Municipal / Road Department",
+      ],
+
+      coordination_reason:
+        "The electrical hazard is affecting a public road and disrupting traffic. Electricity personnel must secure the live hazard first, traffic authorities must control access, and the municipal or road team can restore normal road movement after the electrical danger is removed.",
+
+      action_plan: [
+        {
+          step: 1,
+          department:
+            "Electricity Department",
+          action:
+            "Immediately isolate the electrical supply, secure the fallen live wire, and make the area safe from electric shock.",
+          depends_on: null,
+          status: "Pending",
+        },
+
+        {
+          step: 2,
+          department:
+            "Traffic Management Department",
+          action:
+            "Restrict access around the hazardous section, redirect vehicles and pedestrians, and manage traffic until the electrical danger is removed.",
+          depends_on: 1,
+          status: "Pending",
+        },
+
+        {
+          step: 3,
+          department:
+            "Municipal / Road Department",
+          action:
+            "Clear any remaining obstruction, inspect the affected road area, and restore safe normal traffic movement.",
+          depends_on: 2,
+          status: "Pending",
+        },
+      ],
+
+      coordination_source:
+        "deterministic",
+    };
+  }
+
+  return null;
+}
+
+// =====================================
+// OTHER BASIC FAIL-SAFE CASES
+// =====================================
+
+function fallbackCoordination(
+  description: string,
+  category: string,
+  department: string
+): CoordinationResult {
+  const text =
+    `${description} ${category}`.toLowerCase();
+
+  // Water/sewer affecting road
+  const waterIssue =
+    text.includes("water") ||
+    text.includes("sewer") ||
+    text.includes("sewage") ||
+    text.includes("drain");
+
+  const roadIssue =
+    text.includes("road") ||
+    text.includes("traffic") ||
+    text.includes("street") ||
+    text.includes("blocking");
+
+  if (
+    waterIssue &&
+    roadIssue
+  ) {
+    return {
+      requires_coordination: true,
+
+      primary_department:
+        department ||
+        "Water & Sewerage Department",
+
+      involved_departments: [
+        "Water & Sewerage Department",
+        "Municipal / Road Department",
+      ],
+
+      coordination_reason:
+        "The water or sewer problem is also affecting the road, requiring infrastructure repair followed by road restoration.",
+
+      action_plan: [
+        {
+          step: 1,
+          department:
+            "Water & Sewerage Department",
+          action:
+            "Identify and repair the water or sewer infrastructure problem.",
+          depends_on: null,
+          status: "Pending",
+        },
+
+        {
+          step: 2,
+          department:
+            "Municipal / Road Department",
+          action:
+            "Clean and restore the affected road after the utility repair is completed.",
+          depends_on: 1,
+          status: "Pending",
+        },
+      ],
+
+      coordination_source:
+        "fallback",
+    };
+  }
+
+  return {
+    requires_coordination: false,
+
+    primary_department:
+      department ||
+      "Municipal Department",
+
+    involved_departments:
+      department
+        ? [department]
+        : ["Municipal Department"],
+
+    coordination_reason:
+      "The complaint can currently be handled by the primary assigned department.",
+
+    action_plan: [],
+
+    coordination_source:
+      "fallback",
+  };
+}
+
+// =====================================
+// POST
+// =====================================
+
+export async function POST(
+  request: Request
+) {
   try {
-    const body = await request.json();
+    const body =
+      await request.json();
 
-    const {
-      description,
-      category,
-      priority,
-      department,
-      location,
-    } = body;
+    const description =
+      typeof body.description ===
+      "string"
+        ? body.description.trim()
+        : "";
+
+    const category =
+      typeof body.category ===
+      "string"
+        ? body.category.trim()
+        : "";
+
+    const priority =
+      typeof body.priority ===
+      "string"
+        ? body.priority.trim()
+        : "";
+
+    const department =
+      typeof body.department ===
+      "string"
+        ? body.department.trim()
+        : "";
+
+    const location =
+      typeof body.location ===
+      "string"
+        ? body.location.trim()
+        : "Unknown";
 
     if (!description) {
       return NextResponse.json(
         {
-          error: "Description is required.",
+          error:
+            "Description is required.",
         },
         {
           status: 400,
@@ -27,32 +283,57 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================
+    // FIRST: deterministic agent
+    // =====================================
+
+    const deterministic =
+      detectDeterministicCoordination(
+        description,
+        category,
+        department
+      );
+
+    if (deterministic) {
+      console.log(
+        "Coordination determined locally:",
+        deterministic
+      );
+
+      return NextResponse.json(
+        deterministic
+      );
+    }
+
+    // =====================================
+    // GEMINI
+    // =====================================
+
     const apiKey =
       process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
       return NextResponse.json(
-        {
-          error: "Gemini API key missing.",
-        },
-        {
-          status: 500,
-        }
+        fallbackCoordination(
+          description,
+          category,
+          department
+        )
       );
     }
 
-    const ai = new GoogleGenAI({
-      apiKey,
-    });
+    try {
+      const ai =
+        new GoogleGenAI({
+          apiKey,
+        });
 
-    const prompt = `
+      const prompt = `
 You are the Multi-Department Coordination Agent for CivicPulse AI.
 
-Analyze this civic complaint and determine whether multiple government departments need to work together.
+Analyze this civic complaint and decide whether multiple government departments must coordinate.
 
-COMPLAINT
-
-Description:
+Complaint:
 ${description}
 
 Category:
@@ -61,139 +342,282 @@ ${category || "Unknown"}
 Priority:
 ${priority || "Unknown"}
 
-Initially Assigned Department:
+Primary Department:
 ${department || "Unknown"}
 
 Location:
-${location || "Unknown"}
+${location}
 
-Example:
+IMPORTANT RULES:
 
-A live electric wire has fallen on a road and is blocking traffic.
+1. If one department can completely solve the issue, requires_coordination should be false.
 
-Possible coordination:
-1. Electricity Department — disconnect power and remove electrical danger.
-2. Traffic Police — secure the area and divert traffic.
-3. Road Department — clear obstruction or repair road after electrical danger is removed.
+2. If solving the incident requires different departments in sequence, requires_coordination should be true.
 
-If only one department is required, do not invent extra departments.
+3. Electrical hazards affecting roads or traffic should usually involve:
+   - Electricity Department
+   - Traffic Management Department
+   - Municipal / Road Department when road clearance/restoration is required
+
+4. Water/sewer incidents damaging or blocking roads may require:
+   - Water & Sewerage Department
+   - Municipal / Road Department
+
+5. Action steps must be ordered logically.
+
+6. A later step should depend on the previous required step.
 
 Return ONLY valid JSON:
 
 {
   "requires_coordination": true,
-  "primary_department": "",
-  "involved_departments": [],
-  "coordination_reason": "",
+  "primary_department": "Electricity Department",
+  "involved_departments": [
+    "Electricity Department",
+    "Traffic Management Department",
+    "Municipal / Road Department"
+  ],
+  "coordination_reason": "Short explanation",
   "action_plan": [
     {
       "step": 1,
-      "department": "",
-      "action": "",
+      "department": "Electricity Department",
+      "action": "Action description",
       "depends_on": null
+    },
+    {
+      "step": 2,
+      "department": "Traffic Management Department",
+      "action": "Action description",
+      "depends_on": 1
     }
   ]
 }
-
-RULES:
-
-1. Multiple departments only when genuinely required.
-2. Critical public safety actions must come first.
-3. involved_departments must contain required departments.
-4. If one department is sufficient, requires_coordination must be false.
-5. action_plan must follow safe logical order.
-6. depends_on should contain previous step number when required.
 `;
 
-    let response;
-    let lastError: unknown;
+      let lastError:
+        unknown = null;
 
-    // Retry Gemini automatically up to 3 times
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        console.log(
-          `Coordination AI attempt ${attempt}/3`
-        );
+      for (
+        let attempt = 1;
+        attempt <= 3;
+        attempt++
+      ) {
+        try {
+          const response =
+            await ai.models.generateContent({
+              model:
+                "gemini-3.6-flash",
 
-        response =
-          await ai.models.generateContent({
-            model: "gemini-3.6-flash",
-            contents: prompt,
+              contents:
+                prompt,
+            });
+
+          const cleanText =
+            (
+              response.text ||
+              ""
+            )
+              .replace(
+                /```json/gi,
+                ""
+              )
+              .replace(
+                /```/g,
+                ""
+              )
+              .trim();
+
+          if (!cleanText) {
+            throw new Error(
+              "Empty Gemini coordination response."
+            );
+          }
+
+          const result =
+            JSON.parse(
+              cleanText
+            );
+
+          const requiresCoordination =
+            result.requires_coordination ===
+            true;
+
+          const departments =
+            Array.isArray(
+              result.involved_departments
+            )
+              ? result.involved_departments.filter(
+                  (
+                    item: unknown
+                  ) =>
+                    typeof item ===
+                      "string"
+                )
+              : [];
+
+          const rawPlan =
+            Array.isArray(
+              result.action_plan
+            )
+              ? result.action_plan
+              : [];
+
+          const actionPlan:
+            ActionStep[] =
+            rawPlan.map(
+              (
+                step: {
+                  step?: unknown;
+                  department?: unknown;
+                  action?: unknown;
+                  depends_on?: unknown;
+                },
+                index: number
+              ) => ({
+                step:
+                  Number(
+                    step.step
+                  ) ||
+                  index + 1,
+
+                department:
+                  typeof step.department ===
+                  "string"
+                    ? step.department
+                    : department ||
+                      "Municipal Department",
+
+                action:
+                  typeof step.action ===
+                  "string"
+                    ? step.action
+                    : "Review and address the assigned civic issue.",
+
+                depends_on:
+                  step.depends_on ===
+                    null ||
+                  step.depends_on ===
+                    undefined
+                    ? null
+                    : Number(
+                        step.depends_on
+                      ) ||
+                      null,
+
+                status:
+                  "Pending",
+              })
+            );
+
+          return NextResponse.json({
+            requires_coordination:
+              requiresCoordination,
+
+            primary_department:
+              typeof result.primary_department ===
+                "string"
+                ? result.primary_department
+                : department ||
+                  "Municipal Department",
+
+            involved_departments:
+              departments.length >
+              0
+                ? departments
+                : department
+                ? [department]
+                : [
+                    "Municipal Department",
+                  ],
+
+            coordination_reason:
+              typeof result.coordination_reason ===
+                "string"
+                ? result.coordination_reason
+                : "AI coordination analysis completed.",
+
+            action_plan:
+              requiresCoordination
+                ? actionPlan
+                : [],
+
+            coordination_source:
+              "gemini",
           });
+        } catch (error) {
+          lastError =
+            error;
 
-        break;
-      } catch (error) {
-        lastError = error;
+          console.error(
+            `Coordination Gemini attempt ${attempt} failed:`,
+            error
+          );
 
-        console.error(
-          `Gemini attempt ${attempt} failed:`,
-          error
-        );
-
-        if (attempt < 3) {
-          // 2 sec -> 4 sec delay
-          await wait(attempt * 2000);
+          if (
+            attempt < 3
+          ) {
+            await wait(
+              attempt * 1000
+            );
+          }
         }
       }
-    }
 
-    if (!response) {
-      throw lastError ||
-        new Error(
-          "Gemini coordination service unavailable."
-        );
-    }
+      console.error(
+        "Gemini coordination unavailable:",
+        lastError
+      );
 
-    const cleanText = (
-      response.text || ""
-    )
-      .replace(/```json/gi, "")
-      .replace(/```/g, "")
-      .trim();
-
-    const result =
-      JSON.parse(cleanText);
-
-    return NextResponse.json({
-      requires_coordination:
-        result.requires_coordination === true,
-
-      primary_department:
-        result.primary_department ||
-        department ||
-        "Unknown",
-
-      involved_departments:
-        Array.isArray(
-          result.involved_departments
+      // NEVER BLOCK REPORT
+      return NextResponse.json(
+        fallbackCoordination(
+          description,
+          category,
+          department
         )
-          ? result.involved_departments
-          : [],
+      );
+    } catch (error) {
+      console.error(
+        "Gemini coordination error:",
+        error
+      );
 
-      coordination_reason:
-        result.coordination_reason ||
-        "Coordination analysis completed.",
-
-      action_plan:
-        Array.isArray(result.action_plan)
-          ? result.action_plan
-          : [],
-    });
+      return NextResponse.json(
+        fallbackCoordination(
+          description,
+          category,
+          department
+        )
+      );
+    }
   } catch (error) {
     console.error(
-      "Coordination Agent Error:",
+      "Coordination Route Error:",
       error
     );
 
     return NextResponse.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Coordination analysis failed.",
+        requires_coordination:
+          false,
+
+        primary_department:
+          "Municipal Department",
+
+        involved_departments:
+          ["Municipal Department"],
+
+        coordination_reason:
+          "Coordination analysis could not be completed.",
+
+        action_plan: [],
+
+        coordination_source:
+          "fallback",
       },
       {
-        status: 503,
+        status: 200,
       }
     );
   }
